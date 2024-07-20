@@ -54,6 +54,9 @@ app.post('/api/login', async (req, res) => {
 // Защищенные маршруты
 app.get('/api/posts', authenticateToken, async (req, res) => {
   const user_id = req.user.id;
+  const { page = 1, pageSize = 10 } = req.query;
+  const offset = (page - 1) * pageSize;
+
   try {
     //const posts = await db.any('SELECT * FROM posts');
     //res.json(posts);
@@ -61,12 +64,24 @@ app.get('/api/posts', authenticateToken, async (req, res) => {
     const posts = await db.any(`
       SELECT p.*,
         COALESCE(array_agg(f.user_id::text) FILTER (WHERE f.user_id IS NOT NULL), '{}') as user_id_favourites,
-        COALESCE(array_agg(pl.user_id::text) FILTER (WHERE pl.user_id IS NOT NULL), '{}') as user_id_likes
+        COALESCE(array_agg(pl.user_id::text) FILTER (WHERE pl.user_id IS NOT NULL), '{}') as user_id_likes,
+        EXISTS (
+          SELECT 1
+          FROM post_likes pl2
+          WHERE pl2.post_id = p.id::text AND pl2.user_id = $3
+        ) as liked,
+        EXISTS (
+          SELECT 1
+          FROM post_favourites pf2
+          WHERE pf2.post_id = p.id::text AND pf2.user_id = $3
+        ) as marked_favourite
       FROM posts p
       LEFT JOIN post_favourites f ON p.id = f.post_id
       LEFT JOIN post_likes pl ON p.id = pl.post_id
       GROUP BY p.id
-    `, [user_id]);
+      ORDER BY p.created_at DESC
+      LIMIT $1 OFFSET $2
+    `, [pageSize, offset, user_id]); //, [user_id]);
     res.json(posts);
   } catch (err) {
     console.error('Error fetching posts:', err);
@@ -243,6 +258,7 @@ app.put('/api/posts/:id/like', authenticateToken, async (req, res) => {
 
     const existingLike = await db.oneOrNone('SELECT * FROM post_likes WHERE post_id = $1 AND user_id = $2', [id, userId]);
     let likeIncrement;
+    let liked;
 
     //if (existingLike.rows.length > 0) {
     console.log('existingLike', existingLike);
@@ -251,14 +267,16 @@ app.put('/api/posts/:id/like', authenticateToken, async (req, res) => {
       await db.none('DELETE FROM post_likes WHERE post_id = $1 AND user_id = $2', [id, userId]);
       const result = await db.one('UPDATE posts SET like_increment = like_increment - 1 WHERE id = $1 RETURNING like_increment', [id]);
       likeIncrement = result.like_increment;
+      liked = false;
     } else {
       await db.none('INSERT INTO post_likes (post_id, user_id) VALUES ($1, $2)', [id, userId]);
       const result = await db.one('UPDATE posts SET like_increment = like_increment + 1 WHERE id = $1 RETURNING like_increment', [id]);
       likeIncrement = result.like_increment;
+      liked = true;
     }
 
     //res.json(result.rows[0]);
-    res.json({ like_increment: likeIncrement });
+    res.json({ like_increment: likeIncrement, liked: liked });
 
   } catch (err) {
     console.error('Error updating post like increment:', err);
@@ -327,18 +345,33 @@ app.post('/api/pictureposts', authenticateToken, async (req, res) => {
 
 app.get('/api/pictureposts', authenticateToken, async (req, res) => {
   const user_id = req.user.id;
+  const { page = 1, picturePageSize = 5 } = req.query;
+  const offset = (page - 1) * picturePageSize;
+
   try {
     //const picturePosts = await db.any('SELECT * FROM picture_posts');
     //res.json(picturePosts);
     const pictureposts = await db.any(`
       SELECT p.*,
         COALESCE(array_agg(f.user_id::text) FILTER (WHERE f.user_id IS NOT NULL), '{}') as user_id_favourites,
-        COALESCE(array_agg(pl.user_id::text) FILTER (WHERE pl.user_id IS NOT NULL), '{}') as user_id_likes
+        COALESCE(array_agg(pl.user_id::text) FILTER (WHERE pl.user_id IS NOT NULL), '{}') as user_id_likes,
+        EXISTS (
+          SELECT 1
+          FROM picture_post_likes pl2
+          WHERE pl2.post_id = p.id::text AND pl2.user_id = $3
+        ) as liked,
+        EXISTS (
+          SELECT 1
+          FROM post_favourites pf2
+          WHERE pf2.post_id = p.id::text AND pf2.user_id = $3
+        ) as marked_favourite
       FROM picture_posts p
       LEFT JOIN post_favourites f ON p.id::text = f.post_id
       LEFT JOIN picture_post_likes pl ON p.id::text = pl.post_id
       GROUP BY p.id
-    `, [user_id]);
+      ORDER BY p.created_at DESC
+      LIMIT $1 OFFSET $2
+    `, [picturePageSize, offset, user_id]); //, [user_id]);
     res.json(pictureposts);
   } catch (err) {
     console.error('Error fetching picture posts:', err);
@@ -404,20 +437,23 @@ app.put('/api/pictureposts/:id/like', authenticateToken, async (req, res) => {
 
     const existingLike = await db.oneOrNone('SELECT * FROM picture_post_likes WHERE post_id = $1 AND user_id = $2', [id, userId]);
     let likeIncrement;
+    let liked;
 
     //if (existingLike.rows.length > 0) {
     if (existingLike) {
       await db.none('DELETE FROM picture_post_likes WHERE post_id = $1 AND user_id = $2', [id, userId]);
       const result = await db.one('UPDATE picture_posts SET like_increment = like_increment - 1 WHERE id = $1 RETURNING like_increment', [id]);
       likeIncrement = result.like_increment;
+      liked = false;
     } else {
       await db.none('INSERT INTO picture_post_likes (post_id, user_id) VALUES ($1, $2)', [id, userId]);
       const result = await db.one('UPDATE picture_posts SET like_increment = like_increment + 1 WHERE id = $1 RETURNING like_increment', [id]);
       likeIncrement = result.like_increment;
+      liked = true;
     }
 
     //res.json(result.rows[0]);
-    res.json({ like_increment: likeIncrement });
+    res.json({ like_increment: likeIncrement, liked: liked });
 
   } catch (err) {
     console.error('Error updating picture post like increment:', err);
@@ -491,38 +527,63 @@ app.delete('/api/pictureposts/:id/picture_post_like', authenticateToken, async (
 
 app.get('/api/favouriteposts', authenticateToken, async (req, res) => {
   const userId = req.user.id;
-  console.log(userId)
+  const { page = 1, favouritePageSize = 5 } = req.query;
+  const offset = (page - 1) * favouritePageSize;
+  console.log(userId);
 
   try {
     // Получаем избранные посты из таблицы posts
     const favouriteTextPosts = await db.any(`
       SELECT p.*,
         COALESCE(array_agg(f.user_id::text) FILTER (WHERE f.user_id IS NOT NULL), '{}') as user_id_favourites,
-        COALESCE(array_agg(pl.user_id::text) FILTER (WHERE pl.user_id IS NOT NULL), '{}') as user_id_likes 
+        COALESCE(array_agg(pl.user_id::text) FILTER (WHERE pl.user_id IS NOT NULL), '{}') as user_id_likes,
+        EXISTS (
+          SELECT 1
+          FROM post_likes pl2
+          WHERE pl2.post_id = p.id::text AND pl2.user_id = $1
+        ) as liked,
+        EXISTS (
+          SELECT 1
+          FROM post_favourites pf2
+          WHERE pf2.post_id = p.id::text AND pf2.user_id = $1
+        ) as marked_favourite
       FROM posts p
       LEFT JOIN post_favourites f ON p.id = f.post_id
       LEFT JOIN post_likes pl ON p.id = pl.post_id
       WHERE f.user_id = $1 AND f.favourite_post = true
       GROUP BY p.id
-    `, [userId]);
+      ORDER BY p.created_at DESC
+      LIMIT $2 OFFSET $3
+    `, [userId, favouritePageSize, offset]); //, [userId]);
 
     // Получаем избранные посты из таблицы picture_posts
     const favouritePicturePosts = await db.any(`
       SELECT pp.*,
         COALESCE(array_agg(f.user_id::text) FILTER (WHERE f.user_id IS NOT NULL), '{}') as user_id_favourites,
-        COALESCE(array_agg(pl.user_id::text) FILTER (WHERE pl.user_id IS NOT NULL), '{}') as user_id_likes
+        COALESCE(array_agg(pl.user_id::text) FILTER (WHERE pl.user_id IS NOT NULL), '{}') as user_id_likes,
+        EXISTS (
+          SELECT 1
+          FROM picture_post_likes pl2
+          WHERE pl2.post_id = pp.id::text AND pl2.user_id = $1
+        ) as liked,
+        EXISTS (
+          SELECT 1
+          FROM post_favourites pf2
+          WHERE pf2.post_id = pp.id::text AND pf2.user_id = $1
+        ) as marked_favourite
       FROM picture_posts pp
       LEFT JOIN post_favourites f ON pp.id::text = f.post_id
       LEFT JOIN picture_post_likes pl ON pp.id::text = pl.post_id
       WHERE f.user_id = $1 AND f.favourite_post = true
       GROUP BY pp.id
-    `, [userId]);
+      LIMIT $2 OFFSET $3
+    `, [userId, favouritePageSize, offset]); //, [userId]);
 
     // Объединяем оба массива в один
     const favouritePosts = favouriteTextPosts.concat(favouritePicturePosts);
     //console.log(favouritePosts);
     console.log(favouriteTextPosts);
-    //console.log(favouritePicturePosts);
+    console.log(favouritePicturePosts);
 
     res.json(favouritePosts);
   } catch (err) {
