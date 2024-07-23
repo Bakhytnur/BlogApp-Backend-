@@ -209,6 +209,7 @@ app.put('/api/posts/:id/favourite', authenticateToken, async (req, res) => {
 
     const existingFavourite = await db.oneOrNone('SELECT * FROM post_favourites WHERE post_id = $1 AND user_id = $2', [id, userId]);
     let favourite;
+    let marked_favourite;
 
     console.log(existingFavourite)
 
@@ -222,6 +223,7 @@ app.put('/api/posts/:id/favourite', authenticateToken, async (req, res) => {
       await db.none('DELETE FROM post_favourites WHERE post_id = $1 AND user_id = $2', [id, userId]);
       const result = await db.one('UPDATE posts SET favourite = false WHERE id = $1 RETURNING favourite', [id]);
       favourite = result.favourite;
+      marked_favourite = false;
     } else {
       //const newFavourite = await db.one(
         //'INSERT INTO post_favourites(id, user_id, post_id, favourite) VALUES($1, $2, $3, $4) RETURNING *',
@@ -232,9 +234,10 @@ app.put('/api/posts/:id/favourite', authenticateToken, async (req, res) => {
       await db.none('INSERT INTO post_favourites(id, post_id, user_id, favourite_post) VALUES ($1, $2, $3, $4)', [uuidv4(), id, userId, true]);
       const result = await db.one('UPDATE posts SET favourite = true WHERE id = $1 RETURNING favourite', [id]);
       favourite = result.favourite;
+      marked_favourite = true;
     }
 
-    res.json({ favourite: favourite });
+    res.json({ favourite: favourite, marked_favourite: marked_favourite });
 
   } catch (err) {
     console.error('Error updating post favourite:', err);
@@ -475,6 +478,7 @@ app.put('/api/pictureposts/:id/favourite', authenticateToken, async (req, res) =
 
     const existingFavourite = await db.oneOrNone('SELECT * FROM post_favourites WHERE post_id = $1 AND user_id = $2', [id, userId]);
     let favourite;
+    let marked_favourite;
   
     console.log(existingFavourite)
   
@@ -482,13 +486,15 @@ app.put('/api/pictureposts/:id/favourite', authenticateToken, async (req, res) =
       await db.none('DELETE FROM post_favourites WHERE post_id = $1 AND user_id = $2', [id, userId]);
       const result = await db.one('UPDATE picture_posts SET favourite = false WHERE id = $1 RETURNING favourite', [id]);
       favourite = result.favourite;
+      marked_favourite = false;
     } else {
       await db.none('INSERT INTO post_favourites(id, post_id, user_id, favourite_post) VALUES ($1, $2, $3, $4)', [uuidv4(), id, userId, true]);
       const result = await db.one('UPDATE picture_posts SET favourite = true WHERE id = $1 RETURNING favourite', [id]);
       favourite = result.favourite;
+      marked_favourite = true;
     }
   
-    res.json({ favourite: favourite });
+    res.json({ favourite: favourite, marked_favourite: marked_favourite });
   } catch (err) {
     console.error('Error updating picture post favourite:', err);
     res.status(500).send('Server error');
@@ -578,6 +584,69 @@ app.get('/api/favouriteposts', authenticateToken, async (req, res) => {
       GROUP BY pp.id
       LIMIT $2 OFFSET $3
     `, [userId, favouritePageSize, offset]); //, [userId]);
+
+    // Объединяем оба массива в один
+    const favouritePosts = favouriteTextPosts.concat(favouritePicturePosts);
+    //console.log(favouritePosts);
+    console.log(favouriteTextPosts);
+    console.log(favouritePicturePosts);
+
+    res.json(favouritePosts);
+  } catch (err) {
+    console.error('Error fetching favourite posts:', err);
+    res.status(500).send('Server error');
+  }
+});
+
+app.get('/api/favouritepostsmain', authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  console.log(userId);
+
+  try {
+    // Получаем избранные посты из таблицы posts
+    const favouriteTextPosts = await db.any(`
+      SELECT p.*,
+        COALESCE(array_agg(f.user_id::text) FILTER (WHERE f.user_id IS NOT NULL), '{}') as user_id_favourites,
+        COALESCE(array_agg(pl.user_id::text) FILTER (WHERE pl.user_id IS NOT NULL), '{}') as user_id_likes,
+        EXISTS (
+          SELECT 1
+          FROM post_likes pl2
+          WHERE pl2.post_id = p.id::text AND pl2.user_id = $1
+        ) as liked,
+        EXISTS (
+          SELECT 1
+          FROM post_favourites pf2
+          WHERE pf2.post_id = p.id::text AND pf2.user_id = $1
+        ) as marked_favourite
+      FROM posts p
+      LEFT JOIN post_favourites f ON p.id = f.post_id
+      LEFT JOIN post_likes pl ON p.id = pl.post_id
+      WHERE f.user_id = $1 AND f.favourite_post = true
+      GROUP BY p.id
+      ORDER BY p.created_at DESC
+    `, [userId]); //, [userId]);
+
+    // Получаем избранные посты из таблицы picture_posts
+    const favouritePicturePosts = await db.any(`
+      SELECT pp.*,
+        COALESCE(array_agg(f.user_id::text) FILTER (WHERE f.user_id IS NOT NULL), '{}') as user_id_favourites,
+        COALESCE(array_agg(pl.user_id::text) FILTER (WHERE pl.user_id IS NOT NULL), '{}') as user_id_likes,
+        EXISTS (
+          SELECT 1
+          FROM picture_post_likes pl2
+          WHERE pl2.post_id = pp.id::text AND pl2.user_id = $1
+        ) as liked,
+        EXISTS (
+          SELECT 1
+          FROM post_favourites pf2
+          WHERE pf2.post_id = pp.id::text AND pf2.user_id = $1
+        ) as marked_favourite
+      FROM picture_posts pp
+      LEFT JOIN post_favourites f ON pp.id::text = f.post_id
+      LEFT JOIN picture_post_likes pl ON pp.id::text = pl.post_id
+      WHERE f.user_id = $1 AND f.favourite_post = true
+      GROUP BY pp.id
+    `, [userId]); //, [userId]);
 
     // Объединяем оба массива в один
     const favouritePosts = favouriteTextPosts.concat(favouritePicturePosts);
